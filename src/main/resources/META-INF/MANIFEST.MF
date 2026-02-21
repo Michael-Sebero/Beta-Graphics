@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+FMLCorePlugin: com.michaelsebero.betagraphics.asm.BetaGraphicsPlugin
+FMLCorePluginContainsFMLMod: true
+MixinConfigs: mixins.betagraphics.json
+
