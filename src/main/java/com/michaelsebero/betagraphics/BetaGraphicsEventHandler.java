@@ -26,7 +26,9 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  *
  * Responsibilities:
  *   - Patches lightBrightnessTable on every world/dimension load.
- *   - Locks gammaSetting to 0.0F and ambientOcclusion to 1 each client tick.
+ *   - Locks gammaSetting to 0.0F each client tick (Beta had no brightness slider).
+ *   - Sets ambientOcclusion = 1 exactly once (on first install) as a default,
+ *     then never overrides the player's choice again.
  *   - Calls BetaLightmapHelper.generateBetaLightmap() at 20Hz as a fallback
  *     in case the Mixin injection into updateLightmap does not fire.
  *   - Ticks BetaFogHelper.tickAmbientDarken() each client tick.
@@ -35,6 +37,23 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  *   - Forces cross-chunk VBO rebuilds when light-emitting blocks change.
  *   - Applies GL_FLAT shading around living entity renders.
  *   - Wires BetaLeavesHelper into the model bake pipeline.
+ *
+ * Smooth lighting default (changed from original lock):
+ *   The original code locked ambientOcclusion = 1 every tick, immediately
+ *   reverting any change the player made in the Video Settings screen.
+ *
+ *   New behaviour: BetaGraphicsMod.isAoDefaultApplied() is checked once per
+ *   session (and once per JVM start). If it returns false (fresh install or
+ *   missing config), ambientOcclusion is set to 1 and
+ *   BetaGraphicsMod.markAoDefaultApplied() is called, which writes
+ *   aoDefaultApplied=true to config/betagraphics.cfg. Subsequent launches load
+ *   the flag as true and skip the default entirely, leaving the player's value
+ *   in options.txt untouched.
+ *
+ *   Because MixinAmbientOcclusionFace still neutralises vertexColorMultiplier
+ *   regardless of the AO setting, all three vanilla AO levels (0/1/2) produce
+ *   Beta-accurate uniform brightness. The setting only affects vertex
+ *   interpolation smoothness, not lightness.
  *
  * Flat shading:
  *   Beta's RenderHelper.enableStandardItemLighting() called glShadeModel(GL_FLAT).
@@ -75,9 +94,8 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  */
 public class BetaGraphicsEventHandler {
 
-    private static final float BETA_AMBIENT = 0.1F;
-    private static final int   BETA_AO      = 1;
     private static final float BETA_GAMMA   = 0.0F;
+    private static final int   BETA_AO      = 1;   // Minimum smooth lighting
 
     /**
      * Ticks before the delayed client-side VBO rebuild fires after a block change.
@@ -88,6 +106,17 @@ public class BetaGraphicsEventHandler {
 
     private int     prevSkyLightSub     = -1;
     private boolean skyLightInitialized = false;
+
+    /**
+     * Whether the one-time AO default has been applied this JVM session.
+     *
+     * This field is separate from BetaGraphicsMod.isAoDefaultApplied() (which
+     * reads the on-disk config flag). The session flag avoids a config-file read
+     * on every tick after the default has already been applied in this session.
+     * It is initialised to false each JVM start; the first tick that finds the
+     * config flag also true will skip the write and set this to true immediately.
+     */
+    private boolean aoDefaultAppliedThisSession = false;
 
     private static final class PendingRebuild {
         final BlockPos pos;
@@ -130,6 +159,7 @@ public class BetaGraphicsEventHandler {
      * shifts the curve for all subsequent light calculations.
      */
     public static void patchLightBrightnessTable(World world) {
+        final float BETA_AMBIENT = 0.1F;
         float[] table = world.provider.getLightBrightnessTable();
         for (int i = 0; i <= 15; i++) {
             float darkness = 1.0F - (float) i / 15.0F;
@@ -149,10 +179,28 @@ public class BetaGraphicsEventHandler {
         Minecraft mc = Minecraft.getMinecraft();
         if (mc == null || mc.gameSettings == null) return;
 
-        if (mc.gameSettings.ambientOcclusion != BETA_AO) {
-            mc.gameSettings.ambientOcclusion = BETA_AO;
+        // ── Smooth lighting default (one-time only) ──────────────────────────
+        //
+        // On fresh install the config flag is false. We set AO=1 once and then
+        // write the flag to disk so subsequent launches skip this entirely.
+        // After the first session the player's choice in Video Settings is
+        // never touched again.
+        //
+        // Note: MixinAmbientOcclusionFace neutralises the AO darkening factor
+        // for all three AO levels, so all values produce Beta-accurate brightness.
+        // The setting only governs vertex interpolation smoothness.
+        if (!aoDefaultAppliedThisSession) {
+            if (!BetaGraphicsMod.isAoDefaultApplied()) {
+                mc.gameSettings.ambientOcclusion = BETA_AO;
+                BetaGraphicsMod.markAoDefaultApplied();
+                System.out.println("[BetaGraphics] First run: set smooth lighting to Minimum (AO=1).");
+            }
+            // Whether we just wrote the default or found it already applied,
+            // flip the session flag so we never enter this block again this run.
+            aoDefaultAppliedThisSession = true;
         }
 
+        // ── Gamma lock (permanent — Beta had no brightness slider) ────────────
         if (mc.gameSettings.gammaSetting != BETA_GAMMA) {
             mc.gameSettings.gammaSetting = BETA_GAMMA;
         }
@@ -167,7 +215,6 @@ public class BetaGraphicsEventHandler {
         // (they'd have their full ticksRemaining and should wait). Items not yet
         // ready are re-queued; items due are applied to mc.world at flush time.
         if (!pendingRebuilds.isEmpty() && mc.world != null) {
-            // Snapshot size: only process entries already in the queue at tick start.
             int toProcess = pendingRebuilds.size();
             for (int i = 0; i < toProcess; i++) {
                 PendingRebuild rb = pendingRebuilds.poll();
@@ -256,8 +303,6 @@ public class BetaGraphicsEventHandler {
         // FIX: Added checkLightFor calls to match onBlockPlace.
         // Without these, breaking a light-emitting block leaves stale block-light
         // values in the 6 neighbouring positions until vanilla's BFS catches up.
-        // The origin check re-propagates from the now-dark position; the neighbor
-        // checks ensure their contributions from the removed block are cleared.
         world.checkLightFor(EnumSkyBlock.BLOCK, origin);
         for (EnumFacing face : EnumFacing.VALUES) {
             world.checkLightFor(EnumSkyBlock.BLOCK, origin.offset(face));
