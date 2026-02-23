@@ -43,6 +43,18 @@ import java.awt.Color;
  * Moon phases:
  *   Beta had no moon phase system. getBetaMoonPhase() always returns 0, selecting
  *   the full-moon tile (u0=0, v0=0) in the 1.12.2 4×2 sprite sheet.
+ *
+ * --- FIX: hasSkyLight() guard ---
+ * MixinWorld replaces World.getSkyColor (func_72833_a) for ALL worlds, including
+ * the Nether and End. Neither dimension has a sky, but updateFogColor still calls
+ * getSkyColor to determine the GL clear colour and fog colour. Without a guard,
+ * the overworld blue-sky HSB formula was applied to Nether/End fog, producing a
+ * blue atmospheric tint in those dimensions.
+ *
+ * Fix: when the world has no sky light (Nether, custom void dimensions), return
+ * Vec3d.ZERO immediately. The Nether's orange fog is computed separately by
+ * vanilla's updateFogColor via the fogColorRed/Green/Blue WorldProvider fields,
+ * which are unaffected by our getSkyColor override.
  */
 public final class BetaSkyHelper {
 
@@ -62,6 +74,14 @@ public final class BetaSkyHelper {
      * @return             Sky colour as Vec3d(r, g, b), all in [0, 1].
      */
     public static Vec3d getBetaSkyColor(World world, Entity entity, float partialTicks) {
+
+        // FIX: Guard for sky-less dimensions (Nether, End, custom void worlds).
+        // The Nether's fog/sky colour is handled entirely by vanilla's
+        // updateFogColor reading WorldProvider.fogColorRed/Green/Blue, which are
+        // separate from getSkyColor. Returning ZERO here leaves those untouched.
+        if (!world.provider.hasSkyLight()) {
+            return Vec3d.ZERO;
+        }
 
         // Step 1: Beta's HSB biome sky colour.
         BlockPos pos   = new BlockPos(entity);

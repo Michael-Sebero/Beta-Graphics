@@ -19,8 +19,7 @@ import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 import org.lwjgl.opengl.GL11;
 
-import java.util.ArrayDeque;
-import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Central event handler for Beta Graphics.
@@ -49,12 +48,30 @@ import java.util.Queue;
  *   Path B (20Hz): generateBetaLightmap() is called here as a guaranteed fallback.
  *
  * Cross-chunk light fix:
- *   BlockEvent.PlaceEvent fires server-side (world.isRemote == false). The server-
- *   side markBlockRangeForRenderUpdate flushes pending chunk sections to the client
- *   immediately. A PendingRebuild is also queued to mark client VBOs dirty after
- *   LIGHT_PACKET_WAIT_TICKS, catching any cross-chunk light data that races with
- *   the initial server flush. The delayed rebuild always uses mc.world (the live
- *   client render world) resolved at flush time, not a stored server-world reference.
+ *   BlockEvent.PlaceEvent / BlockEvent.BreakEvent fire server-side
+ *   (world.isRemote == false). The server-side markBlockRangeForRenderUpdate
+ *   flushes pending chunk sections to the client immediately. A PendingRebuild
+ *   is also queued to mark client VBOs dirty after LIGHT_PACKET_WAIT_TICKS,
+ *   catching any cross-chunk light data that races with the initial server flush.
+ *   The delayed rebuild always uses mc.world (the live client render world)
+ *   resolved at flush time, not a stored server-world reference.
+ *
+ * --- FIX: Thread safety for pendingRebuilds ---
+ * onBlockPlace and onBlockBreak fire on the integrated server thread.
+ * onClientTick (and onWorldLoad for remote worlds) runs on the client thread.
+ * The original ArrayDeque is not thread-safe; concurrent access from both threads
+ * can corrupt the deque structure or throw ConcurrentModificationException.
+ * Fix: replaced ArrayDeque with ConcurrentLinkedQueue, which is designed for
+ * exactly this producer-on-one-thread / consumer-on-another-thread pattern.
+ * The flush loop is rewritten to drain using poll() in a single-pass, respecting
+ * entries that were added between the start and end of the tick's drain.
+ *
+ * --- FIX: onBlockBreak missing checkLightFor calls ---
+ * onBlockPlace called checkLightFor for the origin and all 6 neighbors to force
+ * the BFS re-propagation of block light immediately. onBlockBreak did not,
+ * leaving stale block-light values in neighbour positions until vanilla's slower
+ * update path resolved them. Fix: added matching checkLightFor calls to
+ * onBlockBreak, consistent with how onBlockPlace was already written.
  */
 public class BetaGraphicsEventHandler {
 
@@ -75,7 +92,7 @@ public class BetaGraphicsEventHandler {
     private static final class PendingRebuild {
         final BlockPos pos;
         final int      lightValue;
-        int            ticksRemaining;
+        volatile int   ticksRemaining;
 
         PendingRebuild(BlockPos pos, int lightValue, int ticksRemaining) {
             this.pos            = pos;
@@ -84,7 +101,16 @@ public class BetaGraphicsEventHandler {
         }
     }
 
-    private final Queue<PendingRebuild> pendingRebuilds = new ArrayDeque<>();
+    /**
+     * FIX: ConcurrentLinkedQueue replaces ArrayDeque.
+     *
+     * onBlockPlace/onBlockBreak (server thread) add entries; onClientTick (client
+     * thread) drains them. ArrayDeque is not thread-safe and would corrupt under
+     * concurrent access. ConcurrentLinkedQueue provides lock-free thread safety
+     * with no synchronisation overhead on the hot client-tick path.
+     */
+    private final ConcurrentLinkedQueue<PendingRebuild> pendingRebuilds =
+        new ConcurrentLinkedQueue<>();
 
     // ── World load ────────────────────────────────────────────────────────────
 
@@ -135,10 +161,15 @@ public class BetaGraphicsEventHandler {
             BetaLightmapHelper.generateBetaLightmap();
         }
 
-        // Flush delayed VBO rebuilds, always resolving mc.world at flush time.
+        // Flush delayed VBO rebuilds.
+        // FIX: Rewritten for ConcurrentLinkedQueue. We snapshot the current queue
+        // size to avoid processing entries that were added during this tick's drain
+        // (they'd have their full ticksRemaining and should wait). Items not yet
+        // ready are re-queued; items due are applied to mc.world at flush time.
         if (!pendingRebuilds.isEmpty() && mc.world != null) {
-            int size = pendingRebuilds.size();
-            for (int i = 0; i < size; i++) {
+            // Snapshot size: only process entries already in the queue at tick start.
+            int toProcess = pendingRebuilds.size();
+            for (int i = 0; i < toProcess; i++) {
                 PendingRebuild rb = pendingRebuilds.poll();
                 if (rb == null) break;
                 rb.ticksRemaining--;
@@ -222,6 +253,15 @@ public class BetaGraphicsEventHandler {
         World world = event.getWorld();
         BlockPos origin = event.getPos();
 
+        // FIX: Added checkLightFor calls to match onBlockPlace.
+        // Without these, breaking a light-emitting block leaves stale block-light
+        // values in the 6 neighbouring positions until vanilla's BFS catches up.
+        // The origin check re-propagates from the now-dark position; the neighbor
+        // checks ensure their contributions from the removed block are cleared.
+        world.checkLightFor(EnumSkyBlock.BLOCK, origin);
+        for (EnumFacing face : EnumFacing.VALUES) {
+            world.checkLightFor(EnumSkyBlock.BLOCK, origin.offset(face));
+        }
         markLightRange(world, origin, lv);
 
         if (!world.isRemote) {

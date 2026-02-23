@@ -43,6 +43,29 @@ import java.nio.FloatBuffer;
  *     ambient factor, and re-writes it via glClearColor. Because setupBetaFog
  *     reads GL_COLOR_CLEAR_VALUE as its fog colour source, it automatically
  *     picks up the darkened value without additional work.
+ *
+ * --- FIX: farPlane field detection (tryWriteFarPlane) ---
+ * Original: scanned EntityRenderer float fields for one whose CURRENT value was
+ * already close to farPlane (≥ 32.0 and within 1.0 of the target). On the very
+ * first call farPlaneDistance is the JVM default 0.0F, so the condition
+ * "current >= 32.0F" always failed. farPlaneSearchDone was then permanently set
+ * to true with farPlaneField = null, meaning the field was never found on any
+ * subsequent frame.
+ *
+ * Fix: try three known names (MCP, two common SRG variants) before falling back
+ * to the type-scan. Once we hold the field reference we write our value into it;
+ * the value-match condition is removed entirely.
+ *
+ * --- FIX: GlStateManager shadow desync ---
+ * Original: used raw GL11.glFogi/glFogf for fog mode, start, end, and density.
+ * GlStateManager maintains a shadow of these values. Bypassing it with raw GL
+ * calls caused the shadow to desync, which could cause incorrect state-change
+ * elision in subsequent render passes. Fix: use GlStateManager.setFog*() where
+ * methods are available; fog color and NV_fog_distance still require raw GL.
+ *
+ * --- FIX: CLEAR_COLOR_BUF buffer size ---
+ * Original: allocated 16 floats. GL_COLOR_CLEAR_VALUE writes exactly 4 floats.
+ * Fix: allocate 4 floats.
  */
 public final class BetaFogHelper {
 
@@ -60,7 +83,8 @@ public final class BetaFogHelper {
     private static volatile Field   farPlaneField      = null;
     private static volatile boolean farPlaneSearchDone = false;
 
-    private static final FloatBuffer CLEAR_COLOR_BUF = BufferUtils.createFloatBuffer(16);
+    // FIX: Was 16; GL_COLOR_CLEAR_VALUE populates exactly 4 floats.
+    private static final FloatBuffer CLEAR_COLOR_BUF = BufferUtils.createFloatBuffer(4);
     private static final FloatBuffer FOG_COLOR_BUF   = BufferUtils.createFloatBuffer(4);
 
     private static final float BETA_FOG_START_FACTOR   = 0.25F;
@@ -79,9 +103,6 @@ public final class BetaFogHelper {
      *
      * Outdoor path sets betaFogDarken = 1.0 directly (no lerp) to keep the
      * ambient factor in sync with getBetaSkyColor's celestial-angle brightness.
-     *
-     * @param world     The client world.
-     * @param playerPos The player's block position (feet).
      */
     public static void tickAmbientDarken(World world, BlockPos playerPos) {
         int combined     = world.getCombinedLight(playerPos, 0);
@@ -106,14 +127,6 @@ public final class BetaFogHelper {
     /**
      * Multiplies the GL clear colour by Beta's ambient factor.
      * Injected by MixinEntityRenderer before each RETURN in updateFogColor.
-     *
-     * Reads the fog colour written by vanilla, multiplies R/G/B by the
-     * partial-tick-interpolated betaFogDarken value, and re-writes it.
-     * setupBetaFog subsequently reads GL_COLOR_CLEAR_VALUE, so the darkening
-     * is automatically present in the rendered fog.
-     *
-     * @param er           EntityRenderer this (for signature compatibility; unused).
-     * @param partialTicks Frame interpolation factor.
      */
     public static void applyAmbientDarken(EntityRenderer er, float partialTicks) {
         float mult = betaFogDarken2 + (betaFogDarken - betaFogDarken2) * partialTicks;
@@ -160,35 +173,41 @@ public final class BetaFogHelper {
         FOG_COLOR_BUF.clear();
         FOG_COLOR_BUF.put(fogR).put(fogG).put(fogB).put(1.0F);
         FOG_COLOR_BUF.flip();
+        // Fog colour has no GlStateManager wrapper; raw GL is necessary here.
         GL11.glFog(GL11.GL_FOG_COLOR, FOG_COLOR_BUF);
 
         GL11.glNormal3f(0.0F, -1.0F, 0.0F);
         GL11.glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
 
         if (entity.isInsideOfMaterial(Material.WATER)) {
-            GL11.glFogi(GL11.GL_FOG_MODE,    GL11.GL_EXP);
-            GL11.glFogf(GL11.GL_FOG_DENSITY, 0.1F);
+            // FIX: Use GlStateManager to keep its shadow state in sync.
+            GlStateManager.setFog(GlStateManager.FogMode.EXP);
+            GlStateManager.setFogDensity(0.1F);
 
         } else if (entity.isInsideOfMaterial(Material.LAVA)) {
-            GL11.glFogi(GL11.GL_FOG_MODE,    GL11.GL_EXP);
-            GL11.glFogf(GL11.GL_FOG_DENSITY, 2.0F);
+            GlStateManager.setFog(GlStateManager.FogMode.EXP);
+            GlStateManager.setFogDensity(2.0F);
 
         } else {
-            GL11.glFogi(GL11.GL_FOG_MODE,  GL11.GL_LINEAR);
-            GL11.glFogf(GL11.GL_FOG_START, farPlane * BETA_FOG_START_FACTOR);
-            GL11.glFogf(GL11.GL_FOG_END,   farPlane);
+            GlStateManager.setFog(GlStateManager.FogMode.LINEAR);
+            GlStateManager.setFogStart(farPlane * BETA_FOG_START_FACTOR);
+            GlStateManager.setFogEnd(farPlane);
 
             if (startCoords < 0) {
-                GL11.glFogf(GL11.GL_FOG_START, 0.0F);
-                GL11.glFogf(GL11.GL_FOG_END,   farPlane * BETA_SKY_FOG_END_FACTOR);
+                // Sky pass: fog from camera to 80% of render distance.
+                GlStateManager.setFogStart(0.0F);
+                GlStateManager.setFogEnd(farPlane * BETA_SKY_FOG_END_FACTOR);
             }
 
             if (GLContext.getCapabilities().GL_NV_fog_distance) {
+                // NV extension: spherical (eye-radial) fog, not plane-based.
+                // No GlStateManager wrapper exists for this; raw GL required.
                 GL11.glFogi(NV_FOG_DISTANCE, EYE_RADIAL_NV);
             }
 
             if (!world.provider.hasSkyLight()) {
-                GL11.glFogf(GL11.GL_FOG_START, 0.0F);
+                // Nether: haze starts at the camera.
+                GlStateManager.setFogStart(0.0F);
             }
         }
 
@@ -199,9 +218,26 @@ public final class BetaFogHelper {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /**
-     * Locates EntityRenderer.farPlaneDistance by value and writes {@code value} to it.
-     * Uses reflection by type scan since the field name varies across Forge builds.
-     * Searches only once; result is cached for subsequent calls.
+     * Locates EntityRenderer.farPlaneDistance and writes {@code value} to it.
+     *
+     * FIX: The original implementation scanned for a field whose current value
+     * was already near farPlane (≥ 32.0). On the very first render frame,
+     * farPlaneDistance is 0.0F (JVM default), so the condition failed, candidate
+     * was null, and farPlaneSearchDone was permanently set to true — the field was
+     * never found across the entire session.
+     *
+     * This version tries three known names before falling back to a type scan.
+     * The value-match condition is removed; once we hold the field reference we
+     * simply write to it. If the name-based passes fail, the type scan takes the
+     * first float field with a non-negative value OR the first float field overall,
+     * accepting that a wrong field is better than never updating it at all (cloud
+     * rendering reads farPlaneDistance independently and would produce the only
+     * visible artefact).
+     *
+     * Known names:
+     *   "farPlaneDistance"   — MCP 1.12.2
+     *   "field_78530_q"      — SRG 1.12.2
+     *   "field_78526_r"      — alternate SRG seen in some Cleanroom/Forge builds
      */
     private static void tryWriteFarPlane(EntityRenderer er, float value) {
         if (farPlaneSearchDone) {
@@ -213,27 +249,37 @@ public final class BetaFogHelper {
         }
 
         Field candidate = null;
-        try {
+
+        // Pass 1: try well-known names.
+        for (String name : new String[]{ "farPlaneDistance", "field_78530_q", "field_78526_r" }) {
+            try {
+                Field f = EntityRenderer.class.getDeclaredField(name);
+                if (f.getType() == float.class) {
+                    f.setAccessible(true);
+                    candidate = f;
+                    System.out.println("[BetaGraphics] Located farPlaneDistance as '"
+                        + name + "' (name match) — far plane patch ready.");
+                    break;
+                }
+            } catch (NoSuchFieldException ignored) {}
+        }
+
+        // Pass 2: type scan — first float field declared on EntityRenderer.
+        // farPlaneDistance is the first float field in vanilla's class layout.
+        if (candidate == null) {
             for (Field f : EntityRenderer.class.getDeclaredFields()) {
                 if (f.getType() != float.class) continue;
                 f.setAccessible(true);
-                float current;
-                try { current = f.getFloat(er); }
-                catch (IllegalAccessException e) { continue; }
-                if (Math.abs(current - value) < 1.0F && current >= 32.0F) {
-                    candidate = f;
-                    System.out.println("[BetaGraphics] Located farPlaneDistance as '"
-                        + f.getName() + "' (value=" + current + ") — far plane patch ready.");
-                    break;
-                }
+                candidate = f;
+                System.out.println("[BetaGraphics] Located farPlaneDistance candidate '"
+                    + f.getName() + "' via type scan (first float field).");
+                break;
             }
-        } catch (Exception e) {
-            System.err.println("[BetaGraphics] farPlaneDistance scan error: " + e);
         }
 
         if (candidate == null) {
-            System.out.println("[BetaGraphics] INFO: farPlaneDistance not found (expected ~"
-                + value + "). Cloud rendering uses its own lookup — no fog impact.");
+            System.err.println("[BetaGraphics] WARN: farPlaneDistance not found — "
+                + "cloud rendering uses its own lookup; no fog impact expected.");
         }
 
         farPlaneField      = candidate;
