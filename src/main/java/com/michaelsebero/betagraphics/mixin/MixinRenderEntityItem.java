@@ -10,26 +10,34 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.item.EntityItem;
 import net.minecraft.item.ItemBlock;
 import net.minecraft.item.ItemStack;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 
+import java.util.Random;
+
 /**
  * Mixin targeting RenderEntityItem to restore Beta 1.7.3b's dropped-item appearance.
  *
- * Two render paths:
+ * Two render paths, ported directly from Beta's RenderItem.doRenderItem:
  *
- *   ItemBlock (blocks) → vanilla 1.12.2 rendering with count-based multi-copy piling.
- *     Standard item lighting stays enabled so diffuse shading is preserved.
- *     1–5 copies rendered based on stack count, each offset and rotated, matching
- *     vanilla's pile appearance.
+ *   ItemBlock (blocks) -- Beta-style spinning 3D cube with random pile jitter.
+ *     Scale: 0.25F for normal-render blocks, 0.5F for non-normal (matches Beta).
+ *     Per-copy jitter: (random * 2 - 1) * 0.2F / scale in X, Y, Z.
+ *     Random seed reset to 187L each call (Beta: this.random.setSeed(187L)).
  *
- *   All other items → full spherical billboard + 2D card via BetaItemHelper.
- *     Spherical billboard cancels both camera yaw and pitch:
- *       rotate(180 - playerViewY, 0,1,0) — cancel yaw, flip front face toward viewer.
- *       rotate(-playerViewX,      1,0,0) — cancel pitch (negated to invert camera tilt).
- *     Yaw applied first (outer), pitch second (inner), mirroring the view matrix order.
- *     Every non-block item uses this path — no flat-model detection.
+ *   All other items -- Y-axis cylindrical billboard + flat 2D quad.
+ *     Only rotate(180 - playerViewY, 0,1,0) applied -- no pitch rotation.
+ *     Items face where the player IS, not where they are looking.
+ *     Per-copy jitter: (random * 2 - 1) * 0.3F in X, Y, Z (Beta's exact values).
+ *     BetaItemHelper.renderBetaItem2D draws one centred flat quad per copy.
+ *
+ * Stack count thresholds (Beta 1.7.3b):
+ *   1 copy   -- count == 1
+ *   2 copies -- count > 1
+ *   3 copies -- count > 5
+ *   4 copies -- count > 20
  *
  * isDead guard:
  *   EntityItem.setDead() fires while the entity is still in the render queue when
@@ -37,6 +45,9 @@ import org.spongepowered.asm.mixin.Overwrite;
  */
 @Mixin(net.minecraft.client.renderer.entity.RenderEntityItem.class)
 public abstract class MixinRenderEntityItem extends Render<Entity> {
+
+    // Beta's RenderItem declared this.random = new Random() and seeded it to 187L each call.
+    private final Random random = new Random();
 
     protected MixinRenderEntityItem(RenderManager renderManager) {
         super(renderManager);
@@ -46,8 +57,8 @@ public abstract class MixinRenderEntityItem extends Render<Entity> {
      * Full replacement for RenderEntityItem.doRender (SRG: func_76986_a).
      *
      * @reason Restores Beta 1.7.3b dropped item appearance:
-     *         blocks as vanilla 1.12.2 shaded 3D cubes with pile counts,
-     *         all other items as spherical-billboard 2D cards.
+     *         blocks as Beta-style spinning 3D cubes with random pile jitter,
+     *         all other items as Y-axis-billboard flat 2D quads.
      * @author michaelsebero
      */
     @Overwrite(remap = false)
@@ -62,114 +73,146 @@ public abstract class MixinRenderEntityItem extends Render<Entity> {
         EntityItem entityItem = (EntityItem) entityIn;
         ItemStack stack = entityItem.getItem();
 
-        // Dead or empty — skip geometry, still allow super to handle shadow/fire.
+        // Dead or empty -- skip geometry, still allow super to handle shadow/fire.
         if (entityIn.isDead || stack.isEmpty()) {
             super.doRender(entityIn, x, y, z, entityYaw, partialTicks);
             return;
         }
 
-        // Gentle sine-wave bob; hoverStart staggers items in the same pile.
+        // Beta stack count thresholds: 1 / >1->2 / >5->3 / >20->4.
+        int count = stack.getCount();
+        int copies;
+        if      (count > 20) copies = 4;
+        else if (count >  5) copies = 3;
+        else if (count >  1) copies = 2;
+        else                 copies = 1;
+
+        // Bob -- Beta: sin((age + partialTicks) / 10 + field_804_d) * 0.1 + 0.1
         float age = entityItem.ticksExisted + partialTicks;
         float bob = MathHelper.sin((age / 10.0F) + entityItem.hoverStart) * 0.1F + 0.1F;
 
+        // Spin angle -- Beta: (age + partialTicks) / 20 * (180/PI), i.e. 1 rad/s.
+        float spinAngle = (age / 20.0F) * (180.0F / (float) Math.PI);
+
         if (stack.getItem() instanceof ItemBlock) {
-            renderVanillaBlockItem(stack, x, y, z, bob, partialTicks, entityItem);
+            renderBetaBlockItem(stack, x, y, z, bob, spinAngle, copies);
         } else {
-            float brightness = BetaItemHelper.getBrightnessAt(
-                entityIn.posX, entityIn.posY, entityIn.posZ);
-            renderSphericalBillboard(stack, x, y, z, bob, brightness);
+            float brightness = getBrightnessAt(entityIn.posX, entityIn.posY, entityIn.posZ);
+            renderBetaFlatItem(stack, x, y, z, bob, brightness, copies);
         }
 
-        // Shadow — MixinRender applies the Beta light > 3 threshold.
+        // Shadow -- MixinRender applies the Beta light > 3 threshold.
         super.doRender(entityIn, x, y, z, entityYaw, partialTicks);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Block item — vanilla 1.12.2 behaviour
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    // Block items -- Beta 1.7.3b behaviour
+    // -------------------------------------------------------------------------
 
     /**
-     * Replicates vanilla 1.12.2 RenderEntityItem block rendering:
-     *   - Standard item lighting ENABLED — diffuse shading is preserved.
-     *   - Count-based multi-copy piling: 1/2/3/4/5 copies at 1/2/16/32/48+ items.
-     *   - Each copy is offset in X/Z and has an additional Y rotation so the
-     *     pile looks natural, matching vanilla's exact values.
-     *   - No extra scale applied — GROUND ItemCameraTransforms controls size.
+     * Renders a block item matching Beta's doRenderItem block path.
+     *
+     * Beta scale: 0.25F for normal-render blocks, 0.5F for non-normal.
+     * Per-copy jitter: (random * 2 - 1) * 0.2F / scale in all three axes,
+     * so the jitter is 0.2F in world space regardless of the scale factor.
+     * No fixed offset arrays; no extra per-copy Y-rotation spread.
+     * Random seed reset to 187L each call (Beta: this.random.setSeed(187L)).
      */
-    private void renderVanillaBlockItem(ItemStack stack,
+    private void renderBetaBlockItem(ItemStack stack,
             double x, double y, double z,
-            float bob, float partialTicks, EntityItem entityItem) {
+            float bob, float spinAngle, int copies) {
 
         Minecraft mc = Minecraft.getMinecraft();
         if (mc == null || mc.getRenderItem() == null) return;
 
-        int count = stack.getCount();
-        int copies;
-        if      (count >= 48) copies = 5;
-        else if (count >= 32) copies = 4;
-        else if (count >= 16) copies = 3;
-        else if (count >   1) copies = 2;
-        else                  copies = 1;
+        // Beta's scale selection: 0.25F for normal blocks, 0.5F for non-normal.
+        float scale = 0.25F;
+        net.minecraft.block.Block block = ((ItemBlock) stack.getItem()).getBlock();
+        if (!block.isOpaqueCube(block.getDefaultState())) {
+            scale = 0.5F;
+        }
 
-        // Offsets and rotation spread for each copy — vanilla's values.
-        float[] offX = { 0.0F,  0.17F, -0.17F,  0.17F, -0.17F };
-        float[] offZ = { 0.0F,  0.17F,  0.17F, -0.17F, -0.17F };
-        float[] rot  = { 0.0F, 36.0F,  72.0F,  108.0F, 144.0F };
-
-        // Spin angle — vanilla 1.12.2: ((float)getAge() + partialTicks) / 20.0F radians.
-        float spinRad   = ((float) entityItem.getAge() + partialTicks) / 20.0F;
-        float spinAngle = spinRad * (180.0F / (float) Math.PI);
+        random.setSeed(187L);
 
         for (int i = 0; i < copies; i++) {
             GlStateManager.pushMatrix();
-            GlStateManager.translate(
-                (float) x + offX[i],
-                (float) y + 0.2F + bob,
-                (float) z + offZ[i]);
-            GlStateManager.rotate(spinAngle + rot[i], 0.0F, 1.0F, 0.0F);
-            // Lighting intentionally left ENABLED — block items need diffuse shading.
+            GlStateManager.translate((float) x, (float) y + bob, (float) z);
+            GlStateManager.rotate(spinAngle, 0.0F, 1.0F, 0.0F);
+            GlStateManager.scale(scale, scale, scale);
+
+            if (i > 0) {
+                // Beta: (random * 2 - 1) * 0.2F / scale per axis.
+                float jitterScale = 0.2F / scale;
+                float jx = (random.nextFloat() * 2.0F - 1.0F) * jitterScale;
+                float jy = (random.nextFloat() * 2.0F - 1.0F) * jitterScale;
+                float jz = (random.nextFloat() * 2.0F - 1.0F) * jitterScale;
+                GlStateManager.translate(jx, jy, jz);
+            }
+
             mc.getRenderItem().renderItem(stack, ItemCameraTransforms.TransformType.GROUND);
             GlStateManager.popMatrix();
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // All non-block items — full spherical billboard + 2D card
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    // Non-block items -- Beta 1.7.3b flat quad cylindrical billboard
+    // -------------------------------------------------------------------------
 
     /**
-     * Renders any non-block item as a 2D billboard card that fully tracks the camera.
+     * Renders a non-block item as one or more flat 2D quads, matching Beta's
+     * doRenderItem 2D path exactly.
      *
-     * Spherical billboard:
-     *   rotate(180 - playerViewY, 0,1,0)
-     *     Cancels camera yaw. 180° flips the card so the front face (+Z normal)
-     *     points toward the viewer rather than away.
-     *   rotate(-playerViewX, 1,0,0)
-     *     Cancels camera pitch. Negated because a positive playerViewX tilts the
-     *     camera downward; we must tilt back up by the same amount. Applied after
-     *     yaw so it acts in the yaw-corrected local frame.
+     * Beta applies only a Y-axis rotation (180 - playerViewY) per copy -- a
+     * cylindrical billboard. Items face the player's horizontal position, not the
+     * camera's look direction. No pitch rotation is applied.
      *
-     * Result: card is perpendicular to the view ray at every yaw+pitch combination,
-     * eliminating edge-on distortion when viewed from above or below.
+     * Per-copy jitter (i > 0): (random * 2 - 1) * 0.3F in X, Y, Z.
+     * Random seed reset to 187L each call.
+     *
+     * Scale is 0.5F in all axes (Beta: glScalef(0.5, 0.5, 0.5)).
+     * BetaItemHelper.renderBetaItem2D draws the single centred flat quad.
      */
-    private void renderSphericalBillboard(ItemStack stack,
+    private void renderBetaFlatItem(ItemStack stack,
             double x, double y, double z,
-            float bob, float brightness) {
+            float bob, float brightness, int copies) {
 
-        GlStateManager.pushMatrix();
-        GlStateManager.translate((float) x, (float) y + 0.2F + bob, (float) z);
+        random.setSeed(187L);
 
-        // Cancel camera yaw and flip front face toward viewer.
-        GlStateManager.rotate(180.0F - this.renderManager.playerViewY, 0.0F, 1.0F, 0.0F);
-        // Cancel camera pitch in the yaw-corrected local frame.
-        GlStateManager.rotate(-this.renderManager.playerViewX, 1.0F, 0.0F, 0.0F);
+        for (int i = 0; i < copies; i++) {
+            GlStateManager.pushMatrix();
+            GlStateManager.translate((float) x, (float) y + bob, (float) z);
 
-        GlStateManager.scale(0.5F, 0.5F, 0.5F);
-        // Centre the 0→1 card at the origin (in scaled space).
-        GlStateManager.translate(-0.5F, -0.5F, 1.0F / 32.0F);
+            // Y-axis billboard only -- face the player's position, not look direction.
+            GlStateManager.rotate(180.0F - this.renderManager.playerViewY, 0.0F, 1.0F, 0.0F);
 
-        BetaItemHelper.renderBetaItem2D(stack, brightness);
+            if (i > 0) {
+                // Beta: (random * 2 - 1) * 0.3F jitter per extra copy.
+                float jx = (random.nextFloat() * 2.0F - 1.0F) * 0.3F;
+                float jy = (random.nextFloat() * 2.0F - 1.0F) * 0.3F;
+                float jz = (random.nextFloat() * 2.0F - 1.0F) * 0.3F;
+                GlStateManager.translate(jx, jy, jz);
+            }
 
-        GlStateManager.popMatrix();
+            GlStateManager.scale(0.5F, 0.5F, 0.5F);
+
+            BetaItemHelper.renderBetaItem2D(stack, brightness);
+
+            GlStateManager.popMatrix();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /** Returns Beta-style light brightness at the given world position. */
+    private static float getBrightnessAt(double worldX, double worldY, double worldZ) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc == null || mc.world == null) return 1.0F;
+        BlockPos pos = new BlockPos(
+            MathHelper.floor(worldX),
+            MathHelper.floor(worldY),
+            MathHelper.floor(worldZ));
+        return MathHelper.clamp(mc.world.getLightBrightness(pos), 0.0F, 1.0F);
     }
 }
