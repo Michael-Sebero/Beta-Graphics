@@ -177,7 +177,7 @@ public final class BetaShadowHelper {
             double offX, double offY, double offZ,
             BlockPos.MutableBlockPos mpos) {
 
-        if (!state.isFullBlock()) return;
+        if (!state.isFullCube()) return;
 
         double heightAboveBlock = ey - by;
 

@@ -227,12 +227,13 @@ public final class BetaFogHelper {
      * never found across the entire session.
      *
      * This version tries three known names before falling back to a type scan.
-     * The value-match condition is removed; once we hold the field reference we
-     * simply write to it. If the name-based passes fail, the type scan takes the
-     * first float field with a non-negative value OR the first float field overall,
-     * accepting that a wrong field is better than never updating it at all (cloud
-     * rendering reads farPlaneDistance independently and would produce the only
-     * visible artefact).
+     * The value-match condition is removed entirely; once we hold a field
+     * reference we simply write to it, unconditionally. If the name-based
+     * passes fail, the type scan takes the first float field declared on
+     * EntityRenderer with no check of its current value, accepting that a
+     * wrong field is better than never updating it at all (cloud rendering
+     * reads farPlaneDistance independently and would produce the only visible
+     * artefact).
      *
      * Known names:
      *   "farPlaneDistance"   — MCP 1.12.2

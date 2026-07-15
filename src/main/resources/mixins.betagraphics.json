@@ -3,12 +3,14 @@
   "minVersion": "0.7.11",
   "package": "com.michaelsebero.betagraphics.mixin",
   "compatibilityLevel": "JAVA_8",
+  "refmap": "mixins.betagraphics.refmap.json",
   "client": [
     "MixinEntityRenderer",
     "MixinRender",
     "MixinAmbientOcclusionFace",
     "MixinBlockLeaves",
     "MixinRenderEntityItem",
+    "MixinRenderSnowball",
     "MixinWorld"
   ],
   "injectors": {

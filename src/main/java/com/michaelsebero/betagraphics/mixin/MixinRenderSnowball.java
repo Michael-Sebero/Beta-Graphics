@@ -64,13 +64,19 @@ public abstract class MixinRenderSnowball<T extends Entity> extends Render<T> {
     }
 
     /**
-     * Full replacement for RenderSnowball.doRender (SRG: func_76986_a).
+     * Full replacement for RenderSnowball.doRender.
+     *
+     * FIX: previously declared as func_76986_a with remap=false; same
+     * mismatch and same fix as MixinRenderEntityItem.doRender -- see that
+     * class for the full explanation. This build's Mixin AP resolves
+     * @Overwrite targets against MCP-named classes and writes a refmap on
+     * every compile, so the MCP name with default remap=true is correct here.
      *
      * @reason Restores Beta 1.7.3b flat 2D thrown item appearance.
      * @author michaelsebero
      */
-    @Overwrite(remap = false)
-    public void func_76986_a(T entity, double x, double y, double z,
+    @Overwrite
+    public void doRender(T entity, double x, double y, double z,
             float entityYaw, float partialTicks) {
 
         resolveFields(this);

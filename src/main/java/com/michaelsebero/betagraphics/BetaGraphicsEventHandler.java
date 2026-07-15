@@ -59,7 +59,12 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  *   Beta's RenderHelper.enableStandardItemLighting() called glShadeModel(GL_FLAT).
  *   Because MixinRenderHelper cannot target this method in Cleanroom, GL_FLAT is
  *   applied via RenderLivingEvent.Pre and restored via RenderLivingEvent.Post.
- *   RenderWorldLastEvent provides a safety-net restore after the full world pass.
+ *   flatShadeDepth guards against nested Pre/Post pairs -- a mount rendering
+ *   its rider (spider/chicken jockeys, a player on a horse or in a boat) fires
+ *   a second pair from inside the outer entity's own render call, and without
+ *   the guard the inner Post would restore GL_SMOOTH mid-render of the outer
+ *   entity. RenderWorldLastEvent provides a safety-net restore, and resets the
+ *   depth counter, after the full world pass.
  *
  * Dual lightmap correction:
  *   Path A (~60Hz): MixinEntityRenderer injects generateBetaLightmap() before
@@ -68,12 +73,14 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  *
  * Cross-chunk light fix:
  *   BlockEvent.PlaceEvent / BlockEvent.BreakEvent fire server-side
- *   (world.isRemote == false). The server-side markBlockRangeForRenderUpdate
- *   flushes pending chunk sections to the client immediately. A PendingRebuild
- *   is also queued to mark client VBOs dirty after LIGHT_PACKET_WAIT_TICKS,
- *   catching any cross-chunk light data that races with the initial server flush.
- *   The delayed rebuild always uses mc.world (the live client render world)
- *   resolved at flush time, not a stored server-world reference.
+ *   (world.isRemote == false). markBlockRangeForRenderUpdate is a no-op on the
+ *   server-side World -- only WorldClient overrides it to touch the render
+ *   dispatcher -- so an immediate rebuild has to be issued against mc.world,
+ *   not the event's World. A PendingRebuild is also queued to mark the same
+ *   range dirty again after LIGHT_PACKET_WAIT_TICKS, catching cases where the
+ *   immediate attempt ran before the server's light recalculation had synced
+ *   back to the client. Both the immediate and delayed rebuilds resolve
+ *   mc.world fresh at call time, never a stored world reference.
  *
  * --- FIX: Thread safety for pendingRebuilds ---
  * onBlockPlace and onBlockBreak fire on the integrated server thread.
@@ -91,6 +98,28 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * leaving stale block-light values in neighbour positions until vanilla's slower
  * update path resolved them. Fix: added matching checkLightFor calls to
  * onBlockBreak, consistent with how onBlockPlace was already written.
+ *
+ * --- FIX: markLightRange targeted the wrong World ---
+ * onBlockPlace/onBlockBreak called markLightRange(world, ...) using
+ * event.getWorld(), which is always the server-side World for these two
+ * events (world.isRemote is never true here). World.markBlockRangeForRenderUpdate
+ * is an empty stub; WorldClient is the only subclass that does anything with
+ * it. The "immediate" half of the cross-chunk fix was therefore a no-op in
+ * every case, and the feature was working purely off the delayed
+ * PendingRebuild queue, which already resolved mc.world correctly. Fix:
+ * extracted queueRebuild(), which issues the immediate call against mc.world
+ * instead of the event's World.
+ *
+ * --- FIX: RenderLivingEvent.Pre/Post had no nesting guard ---
+ * A mount rendering its rider fires a nested Pre/Post pair from inside the
+ * outer entity's own render call (spider/chicken jockeys, a player on a horse
+ * or in a boat). Unconditional set/restore meant the inner Post could switch
+ * back to GL_SMOOTH while the outer entity was still being drawn. Fix:
+ * flatShadeDepth counts active Pre calls; GL_FLAT is only (re)applied on the
+ * 0->1 transition and GL_SMOOTH only restored on the 1->0 transition, so
+ * nested pairs no longer step on each other. RenderWorldLastEvent resets the
+ * counter to 0 each frame as a backstop in case a Pre is ever left unmatched
+ * (e.g. an exception mid-render).
  */
 public class BetaGraphicsEventHandler {
 
@@ -106,6 +135,9 @@ public class BetaGraphicsEventHandler {
 
     private int     prevSkyLightSub     = -1;
     private boolean skyLightInitialized = false;
+
+    /** Active RenderLivingEvent.Pre count, guarding against nested mount/rider pairs. */
+    private int flatShadeDepth = 0;
 
     /**
      * Whether the one-time AO default has been applied this JVM session.
@@ -255,19 +287,27 @@ public class BetaGraphicsEventHandler {
     @SubscribeEvent
     @SideOnly(Side.CLIENT)
     public void onRenderLivingPre(RenderLivingEvent.Pre event) {
-        GL11.glShadeModel(GL11.GL_FLAT);
+        if (flatShadeDepth == 0) {
+            GL11.glShadeModel(GL11.GL_FLAT);
+        }
+        flatShadeDepth++;
     }
 
     @SubscribeEvent
     @SideOnly(Side.CLIENT)
     public void onRenderLivingPost(RenderLivingEvent.Post event) {
-        GL11.glShadeModel(GL11.GL_SMOOTH);
+        flatShadeDepth--;
+        if (flatShadeDepth <= 0) {
+            flatShadeDepth = 0;
+            GL11.glShadeModel(GL11.GL_SMOOTH);
+        }
     }
 
-    /** Safety-net restore of GL_SMOOTH after the full world render pass. */
+    /** Safety-net restore of GL_SMOOTH, and depth reset, after the full world render pass. */
     @SubscribeEvent
     @SideOnly(Side.CLIENT)
     public void onRenderWorldLast(RenderWorldLastEvent event) {
+        flatShadeDepth = 0;
         GL11.glShadeModel(GL11.GL_SMOOTH);
     }
 
@@ -285,11 +325,7 @@ public class BetaGraphicsEventHandler {
         for (EnumFacing face : EnumFacing.VALUES) {
             world.checkLightFor(EnumSkyBlock.BLOCK, origin.offset(face));
         }
-        markLightRange(world, origin, lv);
-
-        if (!world.isRemote) {
-            pendingRebuilds.add(new PendingRebuild(origin, lv, LIGHT_PACKET_WAIT_TICKS));
-        }
+        queueRebuild(world, origin, lv);
     }
 
     @SubscribeEvent
@@ -303,15 +339,16 @@ public class BetaGraphicsEventHandler {
         // FIX: Added checkLightFor calls to match onBlockPlace.
         // Without these, breaking a light-emitting block leaves stale block-light
         // values in the 6 neighbouring positions until vanilla's BFS catches up.
+        // Note: BreakEvent fires before the block is actually removed, so this
+        // can't see the change yet -- vanilla's own setBlockState relight covers
+        // the actual value once removal goes through right after this handler
+        // returns. Kept for parity with onBlockPlace; queueRebuild() below is
+        // what the fix actually depends on.
         world.checkLightFor(EnumSkyBlock.BLOCK, origin);
         for (EnumFacing face : EnumFacing.VALUES) {
             world.checkLightFor(EnumSkyBlock.BLOCK, origin.offset(face));
         }
-        markLightRange(world, origin, lv);
-
-        if (!world.isRemote) {
-            pendingRebuilds.add(new PendingRebuild(origin, lv, LIGHT_PACKET_WAIT_TICKS));
-        }
+        queueRebuild(world, origin, lv);
     }
 
     // ── Model bake ────────────────────────────────────────────────────────────
@@ -333,6 +370,29 @@ public class BetaGraphicsEventHandler {
             px - r,   0, pz - r,
             px + r, 255, pz + r
         );
+    }
+
+    /**
+     * Issues a best-effort immediate rebuild against the client's own render
+     * world, then queues a delayed one on the shared pendingRebuilds queue.
+     *
+     * The immediate attempt can run ahead of the server's light recalculation
+     * syncing back to the client, in which case it rebuilds with stale data
+     * and gets redone by the delayed entry -- but for the common case of the
+     * local player's own placement/break it often already has correct data,
+     * so it's cheap insurance rather than dead weight. world is still needed
+     * here (rather than resolving mc.world for both checks) because
+     * world.isRemote is what tells us this fired from actual game logic
+     * rather than some other caller.
+     */
+    private void queueRebuild(World world, BlockPos origin, int lightValue) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc != null && mc.world != null) {
+            markLightRange(mc.world, origin, lightValue);
+        }
+        if (!world.isRemote) {
+            pendingRebuilds.add(new PendingRebuild(origin, lightValue, LIGHT_PACKET_WAIT_TICKS));
+        }
     }
 
     private static void markLightRange(World world, BlockPos origin, int lightValue) {

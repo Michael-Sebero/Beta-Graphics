@@ -53,14 +53,23 @@ public abstract class MixinRenderEntityItem extends Render<Entity> {
     }
 
     /**
-     * Full replacement for RenderEntityItem.doRender (SRG: func_76986_a).
+     * Full replacement for RenderEntityItem.doRender.
+     *
+     * FIX: previously declared as func_76986_a with remap=false, on the
+     * assumption this build generates no refmap and the runtime target is
+     * SRG-obfuscated. This project's toolchain (RetroFuturaGradle 1.4.1) writes
+     * a refmap on every compile, and the Mixin AP resolves @Overwrite targets
+     * against the MCP-named compilePatchedMcJava output -- confirmed by a build
+     * where func_76986_a produced "Cannot find target for @Overwrite method in
+     * net.minecraft.client.renderer.entity.RenderEntityItem". doRender with the
+     * default remap=true is what actually resolves.
      *
      * @reason Restores Beta 1.7.3b dropped item appearance for non-block items;
      *         keeps vanilla 1.12.2 default rendering for block items.
      * @author michaelsebero
      */
-    @Overwrite(remap = false)
-    public void func_76986_a(Entity entityIn, double x, double y, double z,
+    @Overwrite
+    public void doRender(Entity entityIn, double x, double y, double z,
             float entityYaw, float partialTicks) {
 
         if (!(entityIn instanceof EntityItem)) {

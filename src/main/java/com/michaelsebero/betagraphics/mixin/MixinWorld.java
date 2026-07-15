@@ -29,23 +29,33 @@ import org.spongepowered.asm.mixin.Overwrite;
  *   MCP: getSkyColor(Entity, float) → Vec3d
  *   SRG: func_72833_a(Lnet/minecraft/entity/Entity;F)Lnet/minecraft/util/math/Vec3d;
  *
- * The method is declared with its SRG name and remap=false because no refmap is
- * loaded at runtime. Using the MCP name "getSkyColor" with remap=true causes a
- * build-time obfuscation-mapping lookup that cannot resolve to "func_72833_a".
+ * --- FIX: wrong name/remap combination ---
+ * This was previously declared with the literal SRG name and remap=false, on
+ * the assumption that no refmap is generated for this build and the runtime
+ * target is SRG-obfuscated. Neither holds: the toolchain (RetroFuturaGradle)
+ * writes a refmap on every compile, and the Mixin annotation processor
+ * resolves @Overwrite targets against the MCP-named compilePatchedMcJava
+ * output -- confirmed directly by a build where func_72833_a produced
+ * "Cannot find target for @Overwrite method in net.minecraft.world.World"
+ * while methods targeted by their MCP name in sibling Mixins (e.g.
+ * EntityRenderer.setupFog) resolved without complaint. Using the MCP name
+ * with the default remap=true lets the annotation processor both find the
+ * target now and populate the refmap correctly for whatever obfuscation
+ * state the mixin is actually applied against later.
  */
 @Mixin(World.class)
 public abstract class MixinWorld {
 
     /**
-     * Full replacement of World.getSkyColor (SRG: func_72833_a) with Beta 1.7.3b's formula.
+     * Full replacement of World.getSkyColor with Beta 1.7.3b's formula.
      * Delegates to {@link BetaSkyHelper#getBetaSkyColor}.
      *
      * @reason Replaces 1.12.2's ColorizerSky colormap lookup and fog-blend with
      *         Beta 1.7.3b's direct HSB sky colour formula.
      * @author michaelsebero
      */
-    @Overwrite(remap = false)
-    public Vec3d func_72833_a(Entity entityIn, float partialTicks) {
+    @Overwrite
+    public Vec3d getSkyColor(Entity entityIn, float partialTicks) {
         return BetaSkyHelper.getBetaSkyColor((World) (Object) this, entityIn, partialTicks);
     }
 }
