@@ -186,12 +186,18 @@ public class BetaGraphicsEventHandler {
     }
 
     /**
-     * Rewrites the world's lightBrightnessTable with Beta's 0.1 ambient floor.
-     * Vanilla 1.12.2 uses 0.05, which makes darkness ~50% deeper than Beta and
-     * shifts the curve for all subsequent light calculations.
+     * Rewrites the world's lightBrightnessTable with Beta's ambient floor.
+     *
+     * FIX: constant was 0.1F on the assumption that vanilla 1.12.2 uses 0.05F and
+     * Beta differs from it. Confirmed against Beta's actual WorldProvider.
+     * generateLightBrightnessTable: the formula below is a direct match for
+     * Beta's own (down to the (1-d)/(d*3+1) shape), and evaluating it at light
+     * level 0 returns exactly the ambient constant -- Beta's is 0.05F, not 0.1F.
+     * Whether vanilla 1.12.2 actually differs from that is still unconfirmed;
+     * this only corrects the constant to match Beta's confirmed source value.
      */
     public static void patchLightBrightnessTable(World world) {
-        final float BETA_AMBIENT = 0.1F;
+        final float BETA_AMBIENT = 0.05F;
         float[] table = world.provider.getLightBrightnessTable();
         for (int i = 0; i <= 15; i++) {
             float darkness = 1.0F - (float) i / 15.0F;

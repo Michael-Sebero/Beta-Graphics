@@ -17,8 +17,10 @@ import java.io.File;
  * Feature overview:
  *
  *  1. lightBrightnessTable
- *     Overwritten on every world/dimension load using Beta's 0.1 ambient floor.
- *     Vanilla 1.12.2 uses 0.05, producing darker caves and a different light curve.
+ *     Overwritten on every world/dimension load using Beta's 0.05 ambient floor
+ *     (confirmed against Beta's actual WorldProvider.generateLightBrightnessTable;
+ *     previously implemented as 0.1, which didn't match Beta's own source).
+ *     Whether vanilla 1.12.2's own default differs from this is unconfirmed.
  *
  *  2. Lightmap algorithm
  *     EntityRenderer.updateLightmap is replaced with Beta's formula:

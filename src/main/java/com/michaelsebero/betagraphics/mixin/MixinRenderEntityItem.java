@@ -89,8 +89,13 @@ public abstract class MixinRenderEntityItem extends Render<Entity> {
         float age = entityItem.ticksExisted + partialTicks;
         float bob = MathHelper.sin((age / 10.0F) + entityItem.hoverStart) * 0.1F + 0.1F;
 
-        // Spin angle -- Beta: (age + partialTicks) / 20 * (180/PI), i.e. 1 rad/s.
-        float spinAngle = (age / 20.0F) * (180.0F / (float) Math.PI);
+        // Spin angle -- Beta: ((age + partialTicks) / 20 + field_804_d) * (180/PI).
+        // FIX: was missing "+ entityItem.hoverStart" (Beta's field_804_d). Without it,
+        // every dropped item starts its spin from the same angle at the same tick, so
+        // items dropped together spin in lockstep instead of Beta's per-entity phase.
+        // Confirmed against Beta's actual RenderItem.doRenderItem, which adds the same
+        // field_804_d phase to both the bob and spin terms; bob already had it.
+        float spinAngle = (age / 20.0F + entityItem.hoverStart) * (180.0F / (float) Math.PI);
 
         if (stack.getItem() instanceof ItemBlock) {
             renderDefaultBlockItem(stack, x, y, z, bob, spinAngle, stack.getCount());
@@ -188,23 +193,33 @@ public abstract class MixinRenderEntityItem extends Render<Entity> {
         // Seed mixes Beta's 187L with the entity ID so stacked entities spread apart.
         random.setSeed(187L ^ (long) entityId);
 
+        // FIX: call order was rotate -> jitter -> scale; Beta's is scale -> jitter -> rotate
+        // (GL fixed-function calls apply to vertices in reverse of call order, so this
+        // isn't just a cosmetic reordering -- it changes what the jitter offset actually
+        // does). With rotate before jitter, the jitter translate got carried inside the
+        // billboard rotation, so extra copies scattered along camera-relative axes instead
+        // of world-aligned ones. With scale after jitter, the jitter translate never got
+        // the 0.5x scale-down applied to it, so copies spread at the raw +/-0.3 blocks
+        // instead of Beta's effective +/-0.15. Both are fixed by matching Beta's order.
         for (int i = 0; i < copies; i++) {
             GlStateManager.pushMatrix();
             // 0.2F base lift so items float above the ground, not into it.
             GlStateManager.translate((float) x, (float) y + 0.2F + bob, (float) z);
 
-            // Y-axis billboard only -- face the player's position, not look direction.
-            GlStateManager.rotate(180.0F - this.renderManager.playerViewY, 0.0F, 1.0F, 0.0F);
+            GlStateManager.scale(0.5F, 0.5F, 0.5F);
 
             if (i > 0) {
-                // Beta: (random * 2 - 1) * 0.3F jitter per extra copy.
+                // Beta: (random * 2 - 1) * 0.3F jitter per extra copy, applied pre-rotation
+                // (world-aligned) and inside the 0.5x scale (effective +/-0.15 blocks).
                 float jx = (random.nextFloat() * 2.0F - 1.0F) * 0.3F;
                 float jy = (random.nextFloat() * 2.0F - 1.0F) * 0.3F;
                 float jz = (random.nextFloat() * 2.0F - 1.0F) * 0.3F;
                 GlStateManager.translate(jx, jy, jz);
             }
 
-            GlStateManager.scale(0.5F, 0.5F, 0.5F);
+            // Y-axis billboard only -- face the player's position, not look direction.
+            // Applied last so only the quad itself is billboarded, not the jitter offset.
+            GlStateManager.rotate(180.0F - this.renderManager.playerViewY, 0.0F, 1.0F, 0.0F);
 
             BetaItemHelper.renderBetaItem2D(stack, brightness);
 

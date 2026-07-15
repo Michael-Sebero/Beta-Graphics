@@ -18,13 +18,17 @@ import java.nio.FloatBuffer;
  * Restores Beta 1.7.3b's fog model and ambient atmospheric darkening.
  *
  * Fog model (setupBetaFog):
- *   Water  — GL_EXP, density 0.1
- *   Lava   — GL_EXP, density 2.0
+ *   Water  — GL_EXP, density 0.1, fixed colour 0.02/0.02/0.2 (dark cerulean)
+ *   Lava   — GL_EXP, density 2.0, fixed colour 0.6/0.1/0.0 (orange-red)
  *   Normal — GL_LINEAR, start = farPlane * 0.25, end = farPlane
  *     Sky pass (startCoords < 0): start = 0, end = farPlane * 0.8
  *     GL_NV_fog_distance: spherical fog via EYE_RADIAL_NV when available
  *     Nether (no sky light): start = 0 (haze from camera)
  *   No void fog — that was added in Beta 1.8.
+ *   FIX: water/lava previously only changed density/mode; the fixed colours
+ *   above are confirmed against Beta's EntityRenderer.updateFogColor and are
+ *   now applied via setBetaFogColor(), overriding the ambient-darkened
+ *   sky-derived colour this method otherwise reads from GL_COLOR_CLEAR_VALUE.
  *
  * Ambient darkening (fogColor1 / fogColor2 system):
  *   Beta's EntityRenderer tracked the player's local ambient brightness
@@ -37,6 +41,14 @@ import java.nio.FloatBuffer;
  *     Outdoor:     betaFogDarken is fixed at 1.0. getBetaSkyColor already applies
  *                  time-of-day brightness; multiplying again would double-darken and
  *                  cause a sunset shimmer due to the 20Hz lerp lag.
+ *
+ *   KNOWN GAP (not fixed here): Beta's real formula, confirmed in EntityRenderer.
+ *   updateRenderer, has no indoor/outdoor branch at all. It lerps toward a blend
+ *   of local brightness and a flat 1.0, weighted by render distance --
+ *   (3 - gameSettings.renderDistance) / 3.0 in Beta's 0-3 index. 1.12.2's
+ *   renderDistanceChunks is a different unit (2-32 chunks) with no direct
+ *   mapping to that formula, so this needs a deliberate remapping decision
+ *   rather than a mechanical port. Left as-is pending that decision.
  *
  *   applyAmbientDarken() — injected before each RETURN in updateFogColor:
  *     Reads GL_COLOR_CLEAR_VALUE, multiplies by the partial-tick-interpolated
@@ -184,9 +196,21 @@ public final class BetaFogHelper {
             GlStateManager.setFog(GlStateManager.FogMode.EXP);
             GlStateManager.setFogDensity(0.1F);
 
+            // FIX: water only overrode density/mode, never colour. Beta's actual
+            // EntityRenderer.updateFogColor hardcodes fogColorRed/Green/Blue to
+            // 0.02/0.02/0.2 while submerged -- a fixed dark cerulean, independent
+            // of the ambient-darkened sky colour this method otherwise reads from
+            // GL_COLOR_CLEAR_VALUE. Without this, underwater fog picked up
+            // whatever tint the sky/cave darkening happened to produce instead.
+            setBetaFogColor(0.02F, 0.02F, 0.2F);
+
         } else if (entity.isInsideOfMaterial(Material.LAVA)) {
             GlStateManager.setFog(GlStateManager.FogMode.EXP);
             GlStateManager.setFogDensity(2.0F);
+
+            // FIX: same gap as water above. Beta hardcodes lava fog to
+            // 0.6/0.1/0.0 -- a fixed orange-red, confirmed in the same source.
+            setBetaFogColor(0.6F, 0.1F, 0.0F);
 
         } else {
             GlStateManager.setFog(GlStateManager.FogMode.LINEAR);
@@ -213,6 +237,19 @@ public final class BetaFogHelper {
 
         GlStateManager.enableFog();
         GL11.glColorMaterial(GL11.GL_FRONT_AND_BACK, GL11.GL_AMBIENT_AND_DIFFUSE);
+    }
+
+    /**
+     * Overrides GL_FOG_COLOR with a fixed RGB, bypassing the ambient-darkened
+     * sky-derived colour read at the top of setupBetaFog. Used for water/lava,
+     * which have their own hardcoded fog colours in Beta rather than inheriting
+     * the sky/cave colour.
+     */
+    private static void setBetaFogColor(float r, float g, float b) {
+        FOG_COLOR_BUF.clear();
+        FOG_COLOR_BUF.put(r).put(g).put(b).put(1.0F);
+        FOG_COLOR_BUF.flip();
+        GL11.glFog(GL11.GL_FOG_COLOR, FOG_COLOR_BUF);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

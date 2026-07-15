@@ -36,9 +36,16 @@ import java.awt.Color;
  *   night sky faintly blue rather than pure grey.
  *
  * 1.12.2's World.getSkyColor additionally blends the result with the fog colour.
- * Beta performed no such blend — the colour returned here was used as-is for both
- * sky dome and fog. The seamless sky-to-fog transition comes entirely from
- * BetaFogHelper.setupBetaFog rendering GL_LINEAR fog over the sky dome.
+ *
+ * CORRECTION (previously claimed no such blend exists in Beta -- confirmed wrong):
+ * Beta's EntityRenderer.updateFogColor calls a separate World.getFogColor(partialTicks)
+ * -- not this method -- and blends it toward this sky colour using a render-distance
+ * weighted factor (1 - (1/(4-renderDistance))^0.25). So Beta really does have two
+ * distinct colours (sky vs. fog) blended together; this file only produces the sky
+ * half. getFogColor's actual formula hasn't turned up in any source provided yet, so
+ * the fog side of that blend is still just the ambient-darkened version of this sky
+ * colour (via BetaFogHelper reading GL_COLOR_CLEAR_VALUE), not a true implementation
+ * of Beta's blend. Left as-is pending a source that shows World.getFogColor.
  *
  * Moon phases:
  *   Beta had no moon phase system. getBetaMoonPhase() always returns 0, selecting
@@ -110,11 +117,20 @@ public final class BetaSkyHelper {
         b *= brightness * 0.91F + 0.09F;
 
         // Step 3: Rain / thunder darkening.
+        // FIX: blue coefficient was 0.2F. Confirmed against Beta's actual
+        // EntityRenderer.updateFogColor: red and green use 0.5F, but blue
+        // specifically uses 0.4F, not 0.2F -- blue was being under-darkened
+        // during rain, giving rainy skies too strong a blue tint.
+        // KNOWN GAP (not fixed here): in real Beta this darkening happens in
+        // updateFogColor, applied to the already sky/fog-blended colour, not
+        // inside the sky-colour function itself -- see the class doc note
+        // below on the missing getFogColor/sky-fog blend. The coefficient is
+        // now correct; where this logic should ultimately live is still open.
         float rain = world.getRainStrength(partialTicks);
         if (rain > 0.0F) {
             r *= 1.0F - rain * 0.5F;
             g *= 1.0F - rain * 0.5F;
-            b *= 1.0F - rain * 0.2F;
+            b *= 1.0F - rain * 0.4F;
         }
 
         float thunder = world.getThunderStrength(partialTicks);
