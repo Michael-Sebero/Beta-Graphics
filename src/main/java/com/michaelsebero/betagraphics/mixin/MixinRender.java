@@ -17,11 +17,17 @@ import org.spongepowered.asm.mixin.Overwrite;
 public abstract class MixinRender<T extends Entity> {
 
     /**
+     * FIX: was declared protected, which the Mixin AP warned about ("PROTECTED
+     * @Overwrite method will upgrade visibility of PRIVATE method") since
+     * vanilla's renderShadow is private -- matching Beta's own Render.
+     * renderShadow, which is also private. Narrowed back to private; nothing
+     * outside Render itself calls this.
+     *
      * @reason Restores Beta 1.7.3b Render.java line 118 shadow light cutoff.
      * @author michaelsebero
      */
     @Overwrite
-    protected void renderShadow(Entity entity, double x, double y, double z,
+    private void renderShadow(Entity entity, double x, double y, double z,
             float shadowOpacity, float partialTicks) {
         BetaShadowHelper.renderBetaShadow(
             (Render<?>) (Object) this, entity, x, y, z, shadowOpacity, partialTicks);

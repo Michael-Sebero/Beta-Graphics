@@ -61,11 +61,17 @@ public abstract class MixinEntityRenderer {
      * Full replacement for EntityRenderer.setupFog.
      * setupFog is unobfuscated in 1.12.2 — remap=true (default) is correct.
      *
+     * FIX: was declared public, which the Mixin AP warned about ("PUBLIC
+     * @Overwrite method will upgrade visibility of PRIVATE method") since
+     * vanilla's setupFog is private. Narrowed back to private to match
+     * exactly -- nothing outside EntityRenderer itself calls this, so there
+     * was no functional reason for the wider visibility.
+     *
      * @reason Restores Beta 1.7.3b's complete GL fog model.
      * @author michaelsebero
      */
     @Overwrite
-    public void setupFog(int startCoords, float partialTicks) {
+    private void setupFog(int startCoords, float partialTicks) {
         BetaFogHelper.setupBetaFog((EntityRenderer) (Object) this, startCoords, partialTicks);
     }
 }
