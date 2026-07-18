@@ -64,8 +64,23 @@ public abstract class MixinBlockLeaves extends Block {
      * declared on IForgeBlock, not directly on Block, so the Java compiler
      * cannot resolve @Override at compile time. Mixin merges the method
      * via class hierarchy resolution at apply time.
+     *
+     * DIAGNOSTIC: this is the one piece of the 3-layer leaf system with no
+     * @Overwrite/@Inject behind it, so it's the one place a failure wouldn't
+     * crash at launch (mixins.betagraphics.json has "required": true, which
+     * would catch a broken @Overwrite/@Inject target -- it can't catch a bare
+     * method that merges in but doesn't actually satisfy the interface
+     * dispatch). The print below fires once, on first call, to confirm this
+     * method is genuinely reached at runtime. Remove once confirmed.
      */
+    private static volatile boolean loggedFirstCall = false;
+
     public float getAmbientOcclusionLightValue() {
+        if (!loggedFirstCall) {
+            loggedFirstCall = true;
+            System.out.println("[BetaGraphics] DIAGNOSTIC: MixinBlockLeaves.getAmbientOcclusionLightValue() "
+                + "fired -- Layer 1 override is reachable.");
+        }
         return 1.0F;
     }
 }
