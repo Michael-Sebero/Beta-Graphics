@@ -11,7 +11,10 @@
     "MixinBlockLeaves",
     "MixinRenderEntityItem",
     "MixinRenderSnowball",
-    "MixinWorld"
+    "MixinWorld",
+    "MixinColorizerFoliage",
+    "MixinParticleRain",
+    "MixinWorldProvider"
   ],
   "injectors": {
     "defaultRequire": 1

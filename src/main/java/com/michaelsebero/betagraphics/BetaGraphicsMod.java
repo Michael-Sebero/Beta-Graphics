@@ -1,5 +1,6 @@
 package com.michaelsebero.betagraphics;
 
+import com.michaelsebero.betagraphics.client.BetaMapColorHelper;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.common.config.Configuration;
 import net.minecraftforge.fml.common.Mod;
@@ -81,6 +82,26 @@ import java.io.File;
  * 10. Cross-chunk light fix
  *     Forces client VBO rebuild across chunk boundaries when light-emitting blocks
  *     are placed or removed.
+ *
+ * 11. Grass/foliage colorization
+ *     ColorizerFoliage's hardcoded pine/birch overrides are restored to Beta's
+ *     exact values via MixinColorizerFoliage. The base temperature/rainfall
+ *     colormap gradient is restored only if beta_grass.png/beta_foliage.png
+ *     are supplied as resources (see BetaColorHelper) — otherwise 1.12.2's
+ *     stock gradient remains, with pine/birch still corrected. Water tint is
+ *     not yet handled (open question — see BetaColorHelper).
+ *
+ * 12. Rain particles
+ *     ParticleRain's physics and appearance are replaced with Beta's
+ *     EntityRainFX values (gravity, air resistance, ground-skid damping,
+ *     lifespan, untinted colour, texture variation) via MixinParticleRain.
+ *     ParticleSplash is not yet covered — see BetaRainHelper.
+ *
+ * 13. Map item colours
+ *     The 14 map colours that existed in Beta (grass/sand/cloth/tnt/ice/iron/
+ *     foliage/snow/clay/dirt/stone/water/wood, plus transparent air) are
+ *     patched to Beta's exact values via BetaMapColorHelper. Colours for
+ *     blocks added since Beta are left at their 1.12.2 defaults.
  *
  * Required asset override:
  *   Beta's vignette has a dark centre that brightens toward screen edges — the
@@ -167,6 +188,10 @@ public class BetaGraphicsMod {
         if (event.getSide() != Side.CLIENT) return;
 
         MinecraftForge.EVENT_BUS.register(new BetaGraphicsEventHandler());
+
+        // Map colours aren't resource-pack dependent (unlike the grass/foliage
+        // colormap), so a single init()-time patch is sufficient.
+        BetaMapColorHelper.patchMapColors();
 
         System.out.println("[BetaGraphics] Registered event handler.");
     }

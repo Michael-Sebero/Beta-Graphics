@@ -1,5 +1,6 @@
 package com.michaelsebero.betagraphics;
 
+import com.michaelsebero.betagraphics.client.BetaColorHelper;
 import com.michaelsebero.betagraphics.client.BetaFogHelper;
 import com.michaelsebero.betagraphics.client.BetaLeavesHelper;
 import com.michaelsebero.betagraphics.client.BetaLightmapHelper;
@@ -11,6 +12,7 @@ import net.minecraft.world.World;
 import net.minecraftforge.client.event.ModelBakeEvent;
 import net.minecraftforge.client.event.RenderLivingEvent;
 import net.minecraftforge.client.event.RenderWorldLastEvent;
+import net.minecraftforge.client.event.TextureStitchEvent;
 import net.minecraftforge.event.world.BlockEvent;
 import net.minecraftforge.event.world.WorldEvent;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
@@ -37,6 +39,8 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  *   - Forces cross-chunk VBO rebuilds when light-emitting blocks change.
  *   - Applies GL_FLAT shading around living entity renders.
  *   - Wires BetaLeavesHelper into the model bake pipeline.
+ *   - Re-applies the Beta grass/foliage colormap override after every
+ *     texture reload (TextureStitchEvent.Post).
  *
  * Smooth lighting default (changed from original lock):
  *   The original code locked ambientOcclusion = 1 every tick, immediately
@@ -363,6 +367,24 @@ public class BetaGraphicsEventHandler {
     @SubscribeEvent
     public void onModelBake(ModelBakeEvent event) {
         BetaLeavesHelper.onModelBake(event);
+    }
+
+    // ── Texture reload ────────────────────────────────────────────────────────
+
+    /**
+     * Re-applies the Beta grass/foliage colormap override after every texture
+     * reload -- initial load and every resource pack switch. Can't be a
+     * one-time init() call: vanilla reloads ColorizerGrass/Foliage's buffer
+     * from grasscolor.png/foliagecolor.png on every stitch, which would
+     * silently overwrite a one-time override the next time the player
+     * changes resource packs. See BetaColorHelper for the ordering caveat
+     * this depends on (unverified: assumes vanilla's own colormap load
+     * happens at or before this event, not after it).
+     */
+    @SubscribeEvent
+    @SideOnly(Side.CLIENT)
+    public void onTextureStitchPost(TextureStitchEvent.Post event) {
+        BetaColorHelper.applyBetaColormaps();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
