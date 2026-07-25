@@ -30,14 +30,40 @@ import java.util.BitSet;
  *     Layer 1 threshold, or a leaf model that bypassed the ModelBakeEvent wrap),
  *     vertexColorMultiplier is reset to 1.0F on all four vertices unconditionally.
  *
- * --- FIX: SRG method name ---
- * The original code used method = "updateVertexBrightness" with remap=false.
- * remap=false means Mixin uses the provided string as the literal runtime symbol
- * without going through the refmap. In the compiled game, this method is in SRG
- * form: func_178203_a. Using the MCP name with remap=false caused the inject to
- * silently never apply — the Mixin framework finds no matching method and skips
- * the injection without error. This was the only injection in the mod that used
- * an MCP name with remap=false; all others correctly use SRG names.
+ * --- FIX: method target used remap=false + a literal SRG name ---
+ * This was the only injection in the whole mod still resolving its target this
+ * way. Every other Mixin here went through the same two-step history — MCP
+ * name + remap=false silently matching nothing, "fixed" at the time by
+ * switching to the SRG name func_178203_a while keeping remap=false — before
+ * landing on what this toolchain actually needs: the plain MCP name with the
+ * default remap=true, so the Mixin AP populates mixins.betagraphics.refmap.json
+ * and the Mixin FML Remapper Adapter resolves the live target at
+ * class-transform time (see MixinEntityRenderer, MixinWorld,
+ * MixinRenderEntityItem, MixinRender, MixinColorizerFoliage, and
+ * MixinParticleRain for the identical fix, already confirmed working). This
+ * one mixin never got that second half of the fix — and it turns out to be
+ * fatal specifically with OptiFine installed: remap=false takes
+ * "func_178203_a" as a literal runtime name, i.e. whatever bytecode happens to
+ * carry that name once every earlier-running transformer — including
+ * OptiFine's own ClassTransformer, which substantially rewrites
+ * AmbientOcclusionFace's brightness calculation for its own smooth-lighting
+ * feature — has had its turn on the class. OptiFine's own
+ * net.optifine.render.RenderEnv is what first forces AmbientOcclusionFace to
+ * load, from inside RenderGlobal's constructor at startup, and what Mixin
+ * finds under that literal name at that point takes four ints and four floats
+ * and returns a value — not the vanilla updateVertexBrightness(IBlockAccess,
+ * IBlockState, BlockPos, EnumFacing, float[], BitSet) signature
+ * betaNeutraliseAO was written against. Mixin correctly refuses to inject into
+ * a method whose parameters don't match; since this injection is required
+ * rather than optional, that refusal escalates to a MixinTransformerError,
+ * AmbientOcclusionFace never finishes loading, and the game crashes at startup
+ * — every time, as soon as OptiFine is present (confirmed via a 14-mod
+ * OptiFine + Beta Graphics repro: NoClassDefFoundError on AmbientOcclusionFace,
+ * thrown from net.optifine.render.RenderEnv.<init>, root cause
+ * InvalidInjectionException: Invalid descriptor).
+ *
+ * Fix: target the plain MCP name and let remap default to true, matching
+ * every sibling mixin in this project.
  *
  * --- FIX: vertexColorMultiplier field resolution ---
  * AmbientOcclusionFace declares two float[] fields (vertexBrightness then
@@ -118,15 +144,14 @@ public abstract class MixinAmbientOcclusionFace {
     /**
      * Fires after every updateVertexBrightness call.
      *
-     * FIX: method uses SRG name func_178203_a with remap=false.
-     * The original used the MCP name "updateVertexBrightness" with remap=false,
-     * which caused the injection to silently never apply at runtime because the
-     * compiled game uses SRG names, not MCP names.
+     * FIX: target the plain MCP name with the default remap=true — see the
+     * class-level "FIX: method target used remap=false + a literal SRG name"
+     * note above. This is the same pattern already used by every other
+     * @Inject/@Overwrite in this project, and the one this mixin was missing.
      */
     @Inject(
-        method = "func_178203_a",   // SRG for updateVertexBrightness — remap=false required
-        at = @At("RETURN"),
-        remap = false
+        method = "updateVertexBrightness",
+        at = @At("RETURN")
     )
     private void betaNeutraliseAO(IBlockAccess world, IBlockState state, BlockPos pos,
             EnumFacing facing, float[] weights, BitSet shapeState, CallbackInfo ci) {
